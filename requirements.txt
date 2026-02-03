@@ -1,0 +1,4 @@
+scrapegraphai
+playwright
+pandas
+nest_asyncio
