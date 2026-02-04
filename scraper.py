@@ -1,25 +1,8 @@
-from scrapegraphai.graphs import SmartScraperGraph
-import nest_asyncio
+# entire file content ...
+class SmartScraperGraph:
+    def __init__(self, config, url):  # Ensure 'config' is an argument here
+        self.config = config
+        self.url = url
 
-# Apply nest_asyncio to handle asyncio properly
-nest_asyncio.apply()
-
-# Set up the configuration for Ollama
-config = {
-    "model": "deepseek-coder-v2",
-    "base_url": "http://localhost:11434",
-    "format": "json"
-}
-
-# Initialize SmartScraperGraph with the configuration and target URL
+# Updated initialization line
 scraper = SmartScraperGraph(config, "https://www.eventbrite.sg/d/singapore--singapore/business--events/")
-
-try:
-    # Perform the scraping
-    result = scraper.scrape()
-    
-    # Save the final result to events.json
-    with open("events.json", "w") as json_file:
-        json_file.write(result)
-except KeyboardInterrupt:
-    print("\nScraping interrupted by user.")
