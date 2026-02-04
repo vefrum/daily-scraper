@@ -14,9 +14,12 @@ config = {
 # Initialize SmartScraperGraph with the configuration and target URL
 scraper = SmartScraperGraph(config, "https://www.eventbrite.sg/d/singapore--singapore/business--events/")
 
-# Perform the scraping
-result = scraper.scrape()
-
-# Save the final result to events.json
-with open("events.json", "w") as json_file:
-    json_file.write(result)
+try:
+    # Perform the scraping
+    result = scraper.scrape()
+    
+    # Save the final result to events.json
+    with open("events.json", "w") as json_file:
+        json_file.write(result)
+except KeyboardInterrupt:
+    print("\nScraping interrupted by user.")
