@@ -56,8 +56,8 @@ try:
         print("Could not find document in state.")
 
     # Save full version to file
-    document_content = state.get("document", "")
-    if document_content:
+    document_content = state.get("document", None)
+    if document_content is not None:
         with open("raw_scrape_data.txt", "w", encoding="utf-8") as f:
             f.write(document_content)
     else:
@@ -65,9 +65,29 @@ try:
 
     print("\nSaved full robot memory to raw_scrape_data.txt")
 
+    from datetime import datetime, timedelta
+    import re
+
+    def convert_relative_date(date_str):
+        today = datetime.now()
+        if "tomorrow" in date_str.lower():
+            return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif "today" in date_str.lower():
+            return today.strftime("%Y-%m-%d")
+        else:
+            # Example for handling "Saturday" or other day names
+            days_ahead = (datetime.strptime(date_str, "%A") - today).days
+            if days_ahead <= 0:
+                days_ahead += 7
+            return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
     # 6. Save the Result
     with open("events.json", "w", encoding="utf-8") as json_file:
         if isinstance(result, list):
+            # Convert relative dates to actual dates
+            for event in result:
+                if 'date' in event:
+                    event['date'] = convert_relative_date(event['date'])
             json.dump(result, json_file, indent=4)
         else:
             print("Result is not a list. Attempting to wrap in a list.")
