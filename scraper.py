@@ -56,14 +56,21 @@ try:
         print("Could not find document in state.")
 
     # Save full version to file
-    with open("raw_scrape_data.txt", "w", encoding="utf-8") as f:
-        f.write(str(state.get("document", "No document found")))
+    document_content = state.get("document", "No document found")
+    if document_content:
+        with open("raw_scrape_data.txt", "w", encoding="utf-8") as f:
+            f.write(str(document_content))
+    else:
+        print("Document content is empty.")
 
     print("\nSaved full robot memory to raw_scrape_data.txt")
 
     # 6. Save the Result
     with open("events.json", "w", encoding="utf-8") as json_file:
-        json.dump(result, json_file, indent=4)
+        if isinstance(result, list):
+            json.dump(result, json_file, indent=4)
+        else:
+            print("Result is not a list. Please check the scraper output.")
         
     print("Success! Data saved to events.json")
 
