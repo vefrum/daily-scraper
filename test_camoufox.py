@@ -7,7 +7,7 @@ camoufox = Camoufox()
 target_url = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
 
 # Fetch the raw HTML
-html_content = camoufox.scrape(target_url)
+html_content = camoufox.get_html(target_url)
 
 # Print the raw HTML
 print(html_content)
