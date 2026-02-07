@@ -28,6 +28,46 @@ DEFAULT_MAX_PAGES = 2
 SAVE_HTML = False
 
 # =========================
+# VIBE FILTERING CONFIG
+# =========================
+
+ENABLE_VIBE_FILTERING = True
+VIBE_BATCH_SIZE = 30
+
+# Single-label taxonomy (LLM must pick exactly one)
+VIBE_TAXONOMY = [
+    "nightlife_party",
+    "live_music_gig",
+    "comedy_improv",
+    "food_drink",
+    "sports_fitness",
+    "workshop_class",
+    "arts_culture",
+    "social_mixer",
+    "business_networking",
+    "outdoor_adventure",
+    "festival_market",
+    "family_kids",
+    "religious_spiritual",
+    "corporate_professional",
+    "other",
+]
+
+# Categories to remove (serious/business/upskilling etc)
+REMOVED_CATEGORIES = {
+    "business_networking",
+    "corporate_professional",
+    "workshop_class",
+    "religious_spiritual",
+    "family_kids",
+    "other",
+}
+
+# Output files
+FILTERED_EVENTS_FILE = "events_filtered.json"
+REMOVED_EVENTS_FILE = "events_removed.json"
+
+# =========================
 # SOURCES (paste your URLs here)
 # =========================
 # For each source:
@@ -283,6 +323,147 @@ def ensure_list(result):
     return []
 
 
+def chunk_list(items: list, chunk_size: int) -> list:
+    if chunk_size <= 0:
+        return [items]
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def build_event_id(event: dict) -> str:
+    """
+    Stable-ish ID for joining classification results back to events.
+    Prefer URL; fallback to title|date|location.
+    """
+    url = normalise_url(event.get("url", ""))
+    if url:
+        return f"url:{url}"
+    return f"fallback:{make_fallback_key(event)}"
+
+
+def classify_event_vibes_batched(events: list, openai_key: str) -> dict:
+    """
+    Classify events into a single vibe category using LLM, in batches.
+    Returns mapping: event_id -> category
+    """
+    # Prepare payload with IDs
+    payload = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = build_event_id(ev)
+        title = str(ev.get("title", "")).strip()
+        location = str(ev.get("location", "")).strip()
+        price = str(ev.get("price", "")).strip()
+
+        if not event_id or not title:
+            continue
+
+        payload.append(
+            {
+                "id": event_id,
+                "title": title,
+                "location": location,
+                "price": price,
+            }
+        )
+
+    if not payload:
+        return {}
+
+    taxonomy_str = ", ".join([f'"{x}"' for x in VIBE_TAXONOMY])
+
+    prompt = f"""
+You are classifying event listings in Singapore into a single vibe category for a "fun events for ages 20-40" feed.
+
+Rules:
+- Choose EXACTLY ONE category from this list: [{taxonomy_str}]
+- Base your decision mainly on the title. Use location/price only if it helps.
+- If it is business/professional/upskilling/career-related, choose "corporate_professional" or "business_networking".
+- If it is a class/workshop (learning-focused), choose "workshop_class".
+- If it is unclear or not really an event, choose "other".
+
+Return ONLY valid JSON in this exact shape:
+[
+  {{"id": "...", "category": "one_of_the_allowed_categories"}},
+  ...
+]
+
+Here are the events to classify:
+{json.dumps(payload, ensure_ascii=False)}
+"""
+
+    config = {
+        "llm": {
+            "api_key": openai_key,
+            "model": "openai/gpt-5-mini"
+        },
+        "verbose": False,
+    }
+
+    scraper = SmartScraperGraph(
+        prompt=prompt,
+        source="",
+        config=config
+    )
+
+    result = scraper.run()
+
+    # Parse result into mapping
+    mapping = {}
+    if isinstance(result, list):
+        for row in result:
+            if not isinstance(row, dict):
+                continue
+            event_id = str(row.get("id", "")).strip()
+            category = str(row.get("category", "")).strip()
+            if not event_id or not category:
+                continue
+            if category not in VIBE_TAXONOMY:
+                continue
+            mapping[event_id] = category
+
+    return mapping
+
+
+def apply_vibe_filtering(events: list, openai_key: str) -> tuple[list, list]:
+    """
+    Adds 'vibe_category' to events, then splits into (kept, removed) based on taxonomy rules.
+    """
+    kept = []
+    removed = []
+
+    # Batch classify
+    id_to_category = {}
+    batches = chunk_list(events, VIBE_BATCH_SIZE)
+    for idx, batch in enumerate(batches, start=1):
+        print(f"Vibe filtering: classifying batch {idx}/{len(batches)} (size={len(batch)})...")
+        try:
+            batch_map = classify_event_vibes_batched(batch, openai_key=openai_key)
+        except Exception as e:
+            print(f"Vibe filtering: batch {idx} classification failed: {e}")
+            batch_map = {}
+
+        id_to_category.update(batch_map)
+
+        # Small pause to be polite / avoid rate spikes
+        time.sleep(0.2)
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+
+        event_id = build_event_id(ev)
+        category = id_to_category.get(event_id, "other")
+        ev["vibe_category"] = category
+
+        if category in REMOVED_CATEGORIES:
+            removed.append(ev)
+        else:
+            kept.append(ev)
+
+    return kept, removed
+
+
 def crawl_paged(source_cfg: dict, openai_key: str, today: datetime.date) -> list:
     all_events = []
     page_num = int(source_cfg["start_page"])
@@ -400,11 +581,24 @@ def main():
     all_events = dedupe_events(all_events)
     print(f"\nTotal events after dedupe: {len(all_events)}")
 
-    with open("events.json", "w", encoding="utf-8") as json_file:
-        json.dump(all_events, json_file, indent=4, ensure_ascii=False)
+    if ENABLE_VIBE_FILTERING:
+        filtered, removed = apply_vibe_filtering(all_events, openai_key=openai_key)
+        print(f"Vibe filtering done. Kept={len(filtered)}, Removed={len(removed)}")
 
-    print("Success! Data saved to events.json")
-    print(f"Total number of events scraped: {len(all_events)}")
+        with open(FILTERED_EVENTS_FILE, "w", encoding="utf-8") as json_file:
+            json.dump(filtered, json_file, indent=4, ensure_ascii=False)
+
+        with open(REMOVED_EVENTS_FILE, "w", encoding="utf-8") as json_file:
+            json.dump(removed, json_file, indent=4, ensure_ascii=False)
+
+        print(f"Saved filtered events to {FILTERED_EVENTS_FILE}")
+        print(f"Saved removed events to {REMOVED_EVENTS_FILE}")
+    else:
+        with open("events.json", "w", encoding="utf-8") as json_file:
+            json.dump(all_events, json_file, indent=4, ensure_ascii=False)
+        print("Success! Data saved to events.json")
+
+    print(f"Total number of events scraped (deduped): {len(all_events)}")
 
 
 if __name__ == "__main__":
