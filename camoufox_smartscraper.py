@@ -211,6 +211,7 @@ def main():
         json.dump(all_events, json_file, indent=4, ensure_ascii=False)
 
     print("Success! Data saved to events.json")
+    print(f"Total number of events scraped: {len(all_events)}")
 
 
 if __name__ == "__main__":
