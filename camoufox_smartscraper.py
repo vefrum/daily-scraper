@@ -52,10 +52,7 @@ def run_smartscraper_on_html(raw_html: str, openai_key: str, today: datetime.dat
             "api_key": openai_key,
             "model": "openai/gpt-5-mini"
         },
-        "verbose": True,
-        # We are NOT using the built-in browser loader now, since Camoufox already rendered the page.
-        # Keeping headless here doesn't hurt, but it won't be used for HTML source mode.
-        "headless": True,
+        "verbose": False,
     }
 
     scraper = SmartScraperGraph(
