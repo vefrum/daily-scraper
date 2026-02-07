@@ -11,8 +11,10 @@ def main():
     # Fetch the raw HTML
     html_content = camoufox.get_html(target_url)
 
-    # Print the raw HTML
-    print(html_content)
+    # Save the raw HTML to a text file
+    with open("eventbrite_page.txt", "w", encoding="utf-8") as f:
+        f.write(html_content)
+    print("Saved HTML content to eventbrite_page.txt")
 
 
 if __name__ == "__main__":
