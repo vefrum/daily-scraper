@@ -74,7 +74,11 @@ def run_smartscraper_on_html(raw_html: str, openai_key: str, today: datetime.dat
     """
     prompt = f"""
         Find all events on the page.
-        Extract the following fields: 'title', 'date', 'location', 'price from','url'.
+        Extract the following fields: 'title', 'date', 'location', 'price', 'capacity', 'url'.
+
+        Field notes:
+        - 'capacity' should capture availability signals like "Sold out", "Selling fast", "Few tickets left", "Limited spots", etc.
+          If no capacity/availability info is shown, return an empty string for 'capacity'.
 
         IMPORTANT FORMATTING RULES:
         1. Return ONLY a pure JSON list of objects.
