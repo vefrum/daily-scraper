@@ -1,13 +1,19 @@
 from camoufox import Camoufox
 
-# Initialize Camoufox
-camoufox = Camoufox()
 
-# Define the target URL
-target_url = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
+def main():
+    # Initialize Camoufox
+    camoufox = Camoufox()
 
-# Fetch the raw HTML
-html_content = camoufox.get_html(target_url)
+    # Define the target URL
+    target_url = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
 
-# Print the raw HTML
-print(html_content)
+    # Fetch the raw HTML
+    html_content = camoufox.get_html(target_url)
+
+    # Print the raw HTML
+    print(html_content)
+
+
+if __name__ == "__main__":
+    main()
