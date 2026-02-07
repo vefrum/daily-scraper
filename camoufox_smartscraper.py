@@ -18,7 +18,7 @@ nest_asyncio.apply()
 
 # Crawl strategy:
 # - "paged": use a query param (default: "page") and crawl multiple pages
-# - "infinite_scroll": open one URL, scroll down many times, then extract once
+# - "infinite_scroll": open one URL, scroll down, then extract once
 CRAWL_STRATEGY = "paged"
 
 # Paged mode settings
@@ -28,14 +28,22 @@ MAX_PAGES = 2  # good for debugging
 STOP_MODE = "max_pages"  # "max_pages" or "until_empty"
 SAFETY_MAX_PAGES = 50  # used only when STOP_MODE == "until_empty"
 
-# Infinite scroll settings (high cap as requested)
+# Infinite scroll settings
+# If CARD_SELECTOR is set, we can stop early when no new cards load.
+# If CARD_SELECTOR is empty, we fall back to fixed MAX_SCROLLS.
 MAX_SCROLLS = 60
 SCROLL_PAUSE_SEC = 1.2
+CARD_SELECTOR = ""  # e.g. "a.event-card" or "div.EventCard". Leave empty to disable growth detection.
+NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in card count
 
 BASE_URL = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
 
 WAIT_SELECTOR = "div.event-list"
 TIMEOUT_MS = 10000
+
+# Debugging / inspection
+SAVE_HTML = False
+HTML_OUTPUT_FILE = "scraped_page.html"
 
 
 def build_url_with_page_param(base_url: str, page_param: str, page_num: int) -> str:
@@ -51,18 +59,29 @@ def build_url_with_page_param(base_url: str, page_param: str, page_num: int) -> 
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
+def save_html(html: str, filename: str) -> None:
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"Saved rendered HTML to {filename} ({len(html)} chars)")
+
+
 def fetch_rendered_html_with_camoufox(
     url: str,
     wait_selector: str = WAIT_SELECTOR,
     timeout_ms: int = TIMEOUT_MS,
     scroll_times: int = 0,
     scroll_pause_sec: float = SCROLL_PAUSE_SEC,
+    scroll_until_no_growth: bool = False,
+    card_selector: str = "",
+    no_growth_limit: int = NO_GROWTH_LIMIT,
 ) -> str:
     """
     Uses Camoufox to load a JS-heavy page and returns the fully rendered HTML.
 
-    If scroll_times > 0, it will scroll down scroll_times times before capturing HTML.
-    This is a simple infinite-scroll approach that doesn't require a card selector.
+    Scrolling options:
+    - Fixed scrolling: set scroll_times > 0
+    - Adaptive scrolling: set scroll_until_no_growth=True and provide card_selector
+      It will stop when the number of matched elements stops increasing for no_growth_limit rounds.
     """
     with Camoufox(headless=True) as browser:
         page = browser.new_page()
@@ -76,7 +95,43 @@ def fetch_rendered_html_with_camoufox(
         except Exception:
             print("Timed out waiting for selector, continuing anyway...")
 
-        if scroll_times > 0:
+        if scroll_until_no_growth and card_selector:
+            print(
+                f"Scrolling until no growth using CARD_SELECTOR='{card_selector}' "
+                f"(no_growth_limit={no_growth_limit}, max_scrolls={MAX_SCROLLS})..."
+            )
+            last_count = -1
+            no_growth = 0
+            scrolls = 0
+
+            while True:
+                try:
+                    current_count = page.locator(card_selector).count()
+                except Exception:
+                    current_count = -1
+
+                if current_count == last_count:
+                    no_growth += 1
+                else:
+                    no_growth = 0
+
+                if no_growth >= no_growth_limit:
+                    print(f"No growth for {no_growth_limit} rounds. Stopping scroll.")
+                    break
+
+                if scrolls >= MAX_SCROLLS:
+                    print(f"Reached MAX_SCROLLS={MAX_SCROLLS}. Stopping scroll.")
+                    break
+
+                last_count = current_count
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                time.sleep(scroll_pause_sec)
+                scrolls += 1
+
+                if scrolls % 10 == 0:
+                    print(f"Scrolled {scrolls} times; current card count={current_count}")
+
+        elif scroll_times > 0:
             print(f"Scrolling {scroll_times} times to load more content...")
             for i in range(scroll_times):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -203,6 +258,9 @@ def crawl_paged(openai_key: str, today: datetime.date) -> list:
             scroll_times=0,
         )
 
+        if SAVE_HTML:
+            save_html(raw_html, HTML_OUTPUT_FILE)
+
         try:
             result = run_smartscraper_on_html(raw_html=raw_html, openai_key=openai_key, today=today)
         except Exception as e:
@@ -229,9 +287,15 @@ def crawl_infinite_scroll(openai_key: str, today: datetime.date) -> list:
         url=BASE_URL,
         wait_selector=WAIT_SELECTOR,
         timeout_ms=TIMEOUT_MS,
-        scroll_times=MAX_SCROLLS,
+        scroll_times=MAX_SCROLLS if not CARD_SELECTOR else 0,
         scroll_pause_sec=SCROLL_PAUSE_SEC,
+        scroll_until_no_growth=bool(CARD_SELECTOR),
+        card_selector=CARD_SELECTOR,
+        no_growth_limit=NO_GROWTH_LIMIT,
     )
+
+    if SAVE_HTML:
+        save_html(raw_html, HTML_OUTPUT_FILE)
 
     result = run_smartscraper_on_html(raw_html=raw_html, openai_key=openai_key, today=today)
     events = ensure_list(result)
