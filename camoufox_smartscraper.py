@@ -22,10 +22,10 @@ SCROLL_PAUSE_SEC = 1.2
 NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in item count
 
 # Default max pages for paged sources
-DEFAULT_MAX_PAGES = 2
+DEFAULT_MAX_PAGES = 1
 
 # Debugging / inspection
-SAVE_HTML = False
+SAVE_HTML = True
 
 # =========================
 # VIBE FILTERING CONFIG
@@ -125,7 +125,7 @@ SOURCES = {
         "start_page": 1,
         "stop_mode": "max_pages",
         "safety_max_pages": 50,
-        "wait_selector": "body",
+        "wait_selector": ".event-card",
         "item_selector": "",
         "html_output_file": "scraped_peatix.html",
     },
@@ -489,7 +489,7 @@ def crawl_paged(source_cfg: dict, openai_key: str, today: datetime.date) -> list
         raw_html = fetch_rendered_html_with_camoufox(
             url=url,
             wait_selector=wait_selector,
-            timeout_ms=10000,
+            timeout_ms=20000,
             scroll_times=0,
         )
 
