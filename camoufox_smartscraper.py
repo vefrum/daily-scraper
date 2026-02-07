@@ -2,6 +2,7 @@ import nest_asyncio
 import os
 import json
 import datetime
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from dotenv import load_dotenv
 
 from camoufox.sync_api import Camoufox
@@ -10,14 +11,50 @@ from scrapegraphai.graphs import SmartScraperGraph
 # Prevent event loop errors in some environments (e.g. notebooks)
 nest_asyncio.apply()
 
-def fetch_rendered_html_with_camoufox(url: str, wait_selector: str = "div.event-list", timeout_ms: int = 10000) -> str:
+# =========================
+# CRAWLER CONFIG (edit here)
+# =========================
+# Choose one:
+# - "max_pages": crawl from START_PAGE to MAX_PAGES (good for debugging)
+# - "until_empty": keep crawling until a page returns 0 events (best-effort "all pages")
+CRAWL_MODE = "max_pages"
+
+START_PAGE = 1
+MAX_PAGES = 2  # used only when CRAWL_MODE == "max_pages"
+
+# If CRAWL_MODE == "until_empty", stop after this many pages as a safety cap
+SAFETY_MAX_PAGES = 50
+
+BASE_URL = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
+
+WAIT_SELECTOR = "div.event-list"
+TIMEOUT_MS = 10000
+
+
+def build_url_for_page(base_url: str, page_num: int) -> str:
+    """
+    Returns base_url with the 'page' query param set to page_num.
+    Works even if base_url already has other query params.
+    """
+    parsed = urlparse(base_url)
+    qs = parse_qs(parsed.query)
+    qs["page"] = [str(page_num)]
+    new_query = urlencode(qs, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def fetch_rendered_html_with_camoufox(
+    url: str,
+    wait_selector: str = WAIT_SELECTOR,
+    timeout_ms: int = TIMEOUT_MS
+) -> str:
     """
     Uses Camoufox to load a JS-heavy page and returns the fully rendered HTML.
     """
     with Camoufox(headless=True) as browser:
         page = browser.new_page()
 
-        print("Navigating...")
+        print(f"Navigating: {url}")
         page.goto(url)
 
         try:
@@ -63,9 +100,61 @@ def run_smartscraper_on_html(raw_html: str, openai_key: str, today: datetime.dat
 
     print("Starting extraction... (This might take a minute)")
     result = scraper.run()
-    state = scraper.get_state()
+    return result
 
-    return result, state
+
+def normalise_url(url: str) -> str:
+    if not isinstance(url, str):
+        return ""
+    return url.strip()
+
+
+def make_fallback_key(event: dict) -> str:
+    """
+    Fallback dedupe key if url is missing.
+    """
+    if not isinstance(event, dict):
+        return ""
+    title = str(event.get("title", "")).strip().lower()
+    date = str(event.get("date", "")).strip().lower()
+    location = str(event.get("location", "")).strip().lower()
+    return f"{title}|{date}|{location}"
+
+
+def dedupe_events(events: list) -> list:
+    """
+    Dedupes events primarily by 'url'. If missing/empty, uses title+date+location.
+    Keeps the first occurrence.
+    """
+    seen = set()
+    out = []
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+
+        url = normalise_url(ev.get("url", ""))
+        key = f"url:{url}" if url else f"fallback:{make_fallback_key(ev)}"
+
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        out.append(ev)
+
+    return out
+
+
+def ensure_list(result):
+    """
+    SmartScraperGraph sometimes returns a dict or string depending on model behaviour.
+    We want a list of dicts.
+    """
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        return [result]
+    return []
 
 
 def main():
@@ -77,61 +166,51 @@ def main():
         raise SystemExit(1)
 
     today = datetime.date.today()
-    target_url = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
 
-    # 1) Render with Camoufox and capture HTML
-    raw_html = fetch_rendered_html_with_camoufox(
-        url=target_url,
-        wait_selector="div.event-list",
-        timeout_ms=10000
-    )
+    all_events = []
+    page_num = START_PAGE
+    pages_crawled = 0
 
-    with open("scraped_page.html", "w", encoding="utf-8") as f:
-        f.write(raw_html)
-    print(f"Captured {len(raw_html)} characters of HTML. Saved to scraped_page.html")
+    while True:
+        if CRAWL_MODE == "max_pages" and page_num > MAX_PAGES:
+            break
+        if CRAWL_MODE == "until_empty" and pages_crawled >= SAFETY_MAX_PAGES:
+            print(f"Reached SAFETY_MAX_PAGES={SAFETY_MAX_PAGES}. Stopping.")
+            break
 
-    # 2) Extract with SmartScraperGraph from the rendered HTML
-    try:
-        result, state = run_smartscraper_on_html(raw_html=raw_html, openai_key=openai_key, today=today)
+        url = build_url_for_page(BASE_URL, page_num)
 
-        # Debug: what the robot saw
-        print("\n--- WHAT THE ROBOT SAW (First 500 chars) ---")
-        if "doc" in state:
-            print(str(state["doc"])[:500])
-        else:
-            print("Could not find document in state.")
+        raw_html = fetch_rendered_html_with_camoufox(
+            url=url,
+            wait_selector=WAIT_SELECTOR,
+            timeout_ms=TIMEOUT_MS
+        )
 
-        # Save full doc
-        document_content = state.get("doc", "")
-        if document_content:
-            with open("raw_scrape_data.txt", "w", encoding="utf-8") as f:
-                f.write(str(document_content))
-            print("\nSaved full robot memory to raw_scrape_data.txt")
-        else:
-            print("Document content is empty or not found.")
+        try:
+            result = run_smartscraper_on_html(raw_html=raw_html, openai_key=openai_key, today=today)
+        except Exception as e:
+            print(f"Extraction failed on page {page_num}: {e}")
+            break
 
-        # Save answer
-        ans_content = state.get("answer", "")
-        if ans_content:
-            with open("answer_data.txt", "w", encoding="utf-8") as f:
-                f.write(str(ans_content))
-            print("Saved answer to answer_data.txt")
-        else:
-            print("Ans content is empty or not found.")
+        events = ensure_list(result)
+        print(f"Page {page_num}: extracted {len(events)} events")
+        all_events.extend(events)
 
-        # Save final JSON
-        with open("events.json", "w", encoding="utf-8") as json_file:
-            if isinstance(result, list):
-                json.dump(result, json_file, indent=4, ensure_ascii=False)
-            else:
-                print("Result is not a list. Attempting to wrap in a list.")
-                json.dump([result], json_file, indent=4, ensure_ascii=False)
+        pages_crawled += 1
 
-        print("Success! Data saved to events.json")
+        if CRAWL_MODE == "until_empty" and len(events) == 0:
+            print("No events found on this page. Stopping.")
+            break
 
-    except Exception as e:
-        print(f"Error occurred: {e}")
-        raise
+        page_num += 1
+
+    all_events = dedupe_events(all_events)
+    print(f"Total events after dedupe: {len(all_events)}")
+
+    with open("events.json", "w", encoding="utf-8") as json_file:
+        json.dump(all_events, json_file, indent=4, ensure_ascii=False)
+
+    print("Success! Data saved to events.json")
 
 
 if __name__ == "__main__":
