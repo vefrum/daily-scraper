@@ -2,3 +2,5 @@ scrapegraphai
 playwright
 pandas
 nest_asyncio
+python-dotenv
+camoufox
