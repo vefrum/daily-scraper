@@ -21,7 +21,7 @@ MAX_SCROLLS = 2
 SCROLL_PAUSE_SEC = 1.2
 NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in item count
 
-# Default max pages for paged sources (can be overridden per source in SOURCES)
+# Default max pages for paged sources
 DEFAULT_MAX_PAGES = 2
 
 # Debugging / inspection
@@ -35,7 +35,7 @@ SAVE_HTML = False
 # - base_url: listing URL
 # - crawl_strategy: "paged" or "infinite_scroll"
 # - page_param: only for "paged" (e.g. "page" for Eventbrite, "p" for Peatix)
-# - start_page/max_pages/stop_mode/safety_max_pages: only for "paged"
+# - start_page/stop_mode/safety_max_pages: only for "paged"
 # - wait_selector: selector to wait for initial content
 # - item_selector: only for "infinite_scroll" adaptive stop (optional; leave "" to use fixed MAX_SCROLLS)
 # - html_output_file: where to save HTML if SAVE_HTML=True (per source)
@@ -46,7 +46,6 @@ SOURCES = {
         "crawl_strategy": "paged",
         "page_param": "page",
         "start_page": 1,
-        "max_pages": 2,
         "stop_mode": "max_pages",  # "max_pages" or "until_empty"
         "safety_max_pages": 50,
         "wait_selector": "div.event-list",
@@ -60,7 +59,6 @@ SOURCES = {
         "crawl_strategy": "infinite_scroll",
         "page_param": "page",
         "start_page": 1,
-        "max_pages": 1,
         "stop_mode": "max_pages",
         "safety_max_pages": 50,
         "wait_selector": "body",
@@ -73,7 +71,6 @@ SOURCES = {
         "crawl_strategy": "infinite_scroll",
         "page_param": "page",
         "start_page": 1,
-        "max_pages": 1,
         "stop_mode": "max_pages",
         "safety_max_pages": 50,
         "wait_selector": "body",
@@ -86,7 +83,6 @@ SOURCES = {
         "crawl_strategy": "paged",
         "page_param": "p",
         "start_page": 1,
-        "max_pages": 2,
         "stop_mode": "max_pages",
         "safety_max_pages": 50,
         "wait_selector": "body",
@@ -294,7 +290,7 @@ def crawl_paged(source_cfg: dict, openai_key: str, today: datetime.date) -> list
 
     base_url = source_cfg["base_url"]
     page_param = source_cfg["page_param"]
-    max_pages = int(source_cfg.get("max_pages", DEFAULT_MAX_PAGES))
+    max_pages = int(DEFAULT_MAX_PAGES)
     stop_mode = source_cfg["stop_mode"]
     safety_max_pages = int(source_cfg["safety_max_pages"])
     wait_selector = source_cfg["wait_selector"]
