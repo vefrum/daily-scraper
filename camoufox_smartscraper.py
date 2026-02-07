@@ -41,7 +41,8 @@ VIBE_TAXONOMY = [
     "comedy_improv",
     "food_drink",
     "sports_fitness",
-    "workshop_class",
+    "workshop_fun_crafts",
+    "workshop_upskilling",
     "arts_culture",
     "social_mixer",
     "business_networking",
@@ -57,7 +58,7 @@ VIBE_TAXONOMY = [
 REMOVED_CATEGORIES = {
     "business_networking",
     "corporate_professional",
-    "workshop_class",
+    "workshop_upskilling",
     "religious_spiritual",
     "family_kids",
     "other",
@@ -311,16 +312,70 @@ def dedupe_events(events: list) -> list:
     return out
 
 
+def _looks_like_event_dict(d: dict) -> bool:
+    if not isinstance(d, dict):
+        return False
+    keys = set(d.keys())
+    eventish = {"title", "date", "location", "price", "capacity", "url"}
+    return len(keys.intersection(eventish)) >= 2
+
+
+def normalise_smartscraper_result_to_list(result):
+    """
+    SmartScraperGraph output can be inconsistent:
+    - list[dict]
+    - dict with a list under keys like "Content"/"events"/"data"
+    - a single dict event
+    - a JSON string of any of the above
+
+    This function normalises everything into list[dict].
+    """
+    if result is None:
+        return []
+
+    # If model returned JSON as string, try parse
+    if isinstance(result, str):
+        s = result.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+        except Exception:
+            return []
+        return normalise_smartscraper_result_to_list(parsed)
+
+    if isinstance(result, list):
+        return [x for x in result if isinstance(x, dict)]
+
+    if isinstance(result, dict):
+        # Common wrappers
+        for k in ("Content", "content", "events", "event", "data", "items", "results", "Result", "output"):
+            v = result.get(k)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+
+        # Sometimes it's {"Content": {"events": [...]}} etc
+        for k in ("Content", "content", "data", "result", "Result", "output"):
+            v = result.get(k)
+            if isinstance(v, dict):
+                unwrapped = normalise_smartscraper_result_to_list(v)
+                if unwrapped:
+                    return unwrapped
+
+        # If it looks like a single event dict, wrap it
+        if _looks_like_event_dict(result):
+            return [result]
+
+        return []
+
+    return []
+
+
 def ensure_list(result):
     """
-    SmartScraperGraph sometimes returns a dict or string depending on model behaviour.
-    We want a list of dicts.
+    Backwards-compatible wrapper.
     """
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        return [result]
-    return []
+    return normalise_smartscraper_result_to_list(result)
 
 
 def chunk_list(items: list, chunk_size: int) -> list:
@@ -338,6 +393,61 @@ def build_event_id(event: dict) -> str:
     if url:
         return f"url:{url}"
     return f"fallback:{make_fallback_key(event)}"
+
+
+def _simple_vibe_heuristic(event: dict) -> str:
+    """
+    Lightweight fallback classifier when LLM output is empty/invalid or overuses 'other'.
+    This is not meant to be perfect, just to reduce 'everything is other'.
+    """
+    title = str(event.get("title", "")).strip().lower()
+    location = str(event.get("location", "")).strip().lower()
+
+    text = f"{title} {location}".strip()
+
+    # Workshops: split fun crafts vs upskilling
+    fun_craft_kw = [
+        "pottery", "ceramic", "clay", "tuft", "tufting", "candle", "candles",
+        "perfume", "scent", "soap", "floral", "flower", "bouquet",
+        "painting", "paint", "art jam", "art-jam", "sip and paint", "sip & paint",
+        "calligraphy", "watercolour", "watercolor", "sketch", "drawing",
+        "baking", "bread", "sourdough", "latte art", "coffee", "mixology",
+        "craft", "handmade", "diy", "knit", "crochet", "embroidery",
+    ]
+    upskill_kw = [
+        "cert", "certificate", "certification", "accredited",
+        "course", "bootcamp", "masterclass", "training",
+        "career", "resume", "cv", "interview",
+        "leadership", "management", "sales", "marketing", "seo",
+        "data", "analytics", "excel", "python", "sql", "ai", "machine learning",
+        "finance", "accounting", "investment", "trading",
+        "productivity", "professional", "business",
+    ]
+
+    if any(k in text for k in fun_craft_kw):
+        return "workshop_fun_crafts"
+    if any(k in text for k in upskill_kw):
+        return "workshop_upskilling"
+
+    # Other vibes
+    if any(k in text for k in ["dj", "club", "party", "rave", "ladies night", "ladies' night"]):
+        return "nightlife_party"
+    if any(k in text for k in ["live music", "gig", "concert", "band", "jazz"]):
+        return "live_music_gig"
+    if any(k in text for k in ["comedy", "stand-up", "stand up", "improv"]):
+        return "comedy_improv"
+    if any(k in text for k in ["brunch", "tasting", "wine", "whisky", "cocktail", "beer", "dinner"]):
+        return "food_drink"
+    if any(k in text for k in ["run", "running", "yoga", "pilates", "spin", "gym", "fitness", "workout"]):
+        return "sports_fitness"
+    if any(k in text for k in ["hike", "hiking", "trail", "kayak", "cycling", "bike", "climb", "climbing"]):
+        return "outdoor_adventure"
+    if any(k in text for k in ["festival", "market", "bazaar", "fair"]):
+        return "festival_market"
+    if any(k in text for k in ["networking", "conference", "summit", "seminar", "webinar", "panel"]):
+        return "business_networking"
+
+    return "other"
 
 
 def classify_event_vibes_batched(events: list, openai_key: str) -> dict:
@@ -375,12 +485,14 @@ def classify_event_vibes_batched(events: list, openai_key: str) -> dict:
     prompt = f"""
 You are classifying event listings in Singapore into a single vibe category for a "fun events for ages 20-40" feed.
 
-Rules:
-- Choose EXACTLY ONE category from this list: [{taxonomy_str}]
-- Base your decision mainly on the title. Use location/price only if it helps.
-- If it is business/professional/upskilling/career-related, choose "corporate_professional" or "business_networking".
-- If it is a class/workshop (learning-focused), choose "workshop_class".
-- If it is unclear or not really an event, choose "other".
+Choose EXACTLY ONE category from this list:
+[{taxonomy_str}]
+
+Key distinctions:
+- "workshop_fun_crafts": fun, hands-on hobby workshops (pottery, candle-making, perfume, art jam, painting, baking, mixology, calligraphy, floral, DIY crafts).
+- "workshop_upskilling": career/professional/skills training (certifications, bootcamps, Excel/Python/SQL, marketing, leadership, finance, productivity, business training).
+- If it is business/professional networking, choose "business_networking" or "corporate_professional".
+- If unclear, choose the best fit; only use "other" when it truly doesn't match anything.
 
 Return ONLY valid JSON in this exact shape:
 [
@@ -388,7 +500,7 @@ Return ONLY valid JSON in this exact shape:
   ...
 ]
 
-Here are the events to classify:
+Events to classify:
 {json.dumps(payload, ensure_ascii=False)}
 """
 
@@ -408,19 +520,30 @@ Here are the events to classify:
 
     result = scraper.run()
 
+    rows = normalise_smartscraper_result_to_list(result)
+
     # Parse result into mapping
     mapping = {}
-    if isinstance(result, list):
-        for row in result:
-            if not isinstance(row, dict):
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        event_id = str(row.get("id", "")).strip()
+        category = str(row.get("category", "")).strip()
+        if not event_id or not category:
+            continue
+        if category not in VIBE_TAXONOMY:
+            continue
+        mapping[event_id] = category
+
+    # If model returned nothing useful, fallback to heuristics for this batch
+    if not mapping:
+        for ev in events:
+            if not isinstance(ev, dict):
                 continue
-            event_id = str(row.get("id", "")).strip()
-            category = str(row.get("category", "")).strip()
-            if not event_id or not category:
+            event_id = build_event_id(ev)
+            if not event_id:
                 continue
-            if category not in VIBE_TAXONOMY:
-                continue
-            mapping[event_id] = category
+            mapping[event_id] = _simple_vibe_heuristic(ev)
 
     return mapping
 
@@ -443,6 +566,16 @@ def apply_vibe_filtering(events: list, openai_key: str) -> tuple[list, list]:
             print(f"Vibe filtering: batch {idx} classification failed: {e}")
             batch_map = {}
 
+        # If batch_map is empty due to failure, fallback to heuristics
+        if not batch_map:
+            for ev in batch:
+                if not isinstance(ev, dict):
+                    continue
+                event_id = build_event_id(ev)
+                if not event_id:
+                    continue
+                batch_map[event_id] = _simple_vibe_heuristic(ev)
+
         id_to_category.update(batch_map)
 
         # Small pause to be polite / avoid rate spikes
@@ -453,7 +586,7 @@ def apply_vibe_filtering(events: list, openai_key: str) -> tuple[list, list]:
             continue
 
         event_id = build_event_id(ev)
-        category = id_to_category.get(event_id, "other")
+        category = id_to_category.get(event_id, _simple_vibe_heuristic(ev))
         ev["vibe_category"] = category
 
         if category in REMOVED_CATEGORIES:
