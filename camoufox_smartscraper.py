@@ -578,12 +578,14 @@ def main():
 
         all_events.extend(events)
 
+    print(f"\nTotal events before dedupe: {len(all_events)}")
+
     all_events = dedupe_events(all_events)
-    print(f"\nTotal events after dedupe: {len(all_events)}")
+    print(f"Total events after dedupe: {len(all_events)}")
 
     if ENABLE_VIBE_FILTERING:
         filtered, removed = apply_vibe_filtering(all_events, openai_key=openai_key)
-        print(f"Vibe filtering done. Kept={len(filtered)}, Removed={len(removed)}")
+        print(f"Vibe filtering done. Input={len(all_events)}, Kept={len(filtered)}, Removed={len(removed)}")
 
         with open(FILTERED_EVENTS_FILE, "w", encoding="utf-8") as json_file:
             json.dump(filtered, json_file, indent=4, ensure_ascii=False)
