@@ -52,13 +52,17 @@ Use this when the site loads more events as you scroll.
 There are 2 ways to scroll:
 
 1) **Fixed scroll count** (simple, but can be slow)
-- Leave `CARD_SELECTOR = ""`
+- Leave `ITEM_SELECTOR = ""`
 - Set `MAX_SCROLLS` and `SCROLL_PAUSE_SEC`
 
-2) **Adaptive scroll (recommended)** (stops early when no new cards load)
-- Set `CARD_SELECTOR` to a CSS selector that matches each event card
-- The script will stop when the number of matched cards stops increasing for `NO_GROWTH_LIMIT` rounds
+2) **Adaptive scroll (recommended)** (stops early when no new items load)
+- Set `ITEM_SELECTOR` to a CSS selector that matches each event item/card
+- The script will stop when the number of matched elements stops increasing for `NO_GROWTH_LIMIT` rounds
 - `MAX_SCROLLS` still acts as a safety cap
+
+Examples:
+- Luma: `.card-wrapper` (ignore the `jsx-123...` class, it’s usually auto-generated)
+- Fever: `[data-testid^="fv-plan-card"]` (matches any element whose `data-testid` starts with `fv-plan-card`)
 
 ### Saving rendered HTML (for inspection)
 
@@ -68,7 +72,7 @@ To save the rendered HTML to disk:
 
 This is useful to understand how the site structures its event cards, even if the HTML is large/noisy.
 
-## How to find a CARD_SELECTOR
+## How to find an ITEM_SELECTOR
 
 1. Set:
    - `SAVE_HTML = True`
@@ -84,7 +88,7 @@ This is useful to understand how the site structures its event cards, even if th
    - Prefer stable attributes like `data-testid`, `data-*`, or consistent container classes.
    - Avoid highly random-looking class names if possible.
 
-5. Set `CARD_SELECTOR` and rerun. The crawler should now stop early once no new cards load.
+5. Set `ITEM_SELECTOR` and rerun. The crawler should now stop early once no new items load.
 
 ## Notes
 - Some sites may show cookie banners or region popups; if extraction looks empty, enable `SAVE_HTML` and inspect what was actually rendered.

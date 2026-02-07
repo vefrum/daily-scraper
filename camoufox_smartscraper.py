@@ -29,12 +29,12 @@ STOP_MODE = "max_pages"  # "max_pages" or "until_empty"
 SAFETY_MAX_PAGES = 50  # used only when STOP_MODE == "until_empty"
 
 # Infinite scroll settings
-# If CARD_SELECTOR is set, we can stop early when no new cards load.
-# If CARD_SELECTOR is empty, we fall back to fixed MAX_SCROLLS.
+# If ITEM_SELECTOR is set, we can stop early when no new items load.
+# If ITEM_SELECTOR is empty, we fall back to fixed MAX_SCROLLS.
 MAX_SCROLLS = 60
 SCROLL_PAUSE_SEC = 1.2
-CARD_SELECTOR = ""  # e.g. "a.event-card" or "div.EventCard". Leave empty to disable growth detection.
-NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in card count
+ITEM_SELECTOR = ""  # e.g. ".card-wrapper" (Luma) or '[data-testid^="fv-plan-card"]' (Fever)
+NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in item count
 
 BASE_URL = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
 
@@ -72,7 +72,7 @@ def fetch_rendered_html_with_camoufox(
     scroll_times: int = 0,
     scroll_pause_sec: float = SCROLL_PAUSE_SEC,
     scroll_until_no_growth: bool = False,
-    card_selector: str = "",
+    item_selector: str = "",
     no_growth_limit: int = NO_GROWTH_LIMIT,
 ) -> str:
     """
@@ -80,7 +80,7 @@ def fetch_rendered_html_with_camoufox(
 
     Scrolling options:
     - Fixed scrolling: set scroll_times > 0
-    - Adaptive scrolling: set scroll_until_no_growth=True and provide card_selector
+    - Adaptive scrolling: set scroll_until_no_growth=True and provide item_selector
       It will stop when the number of matched elements stops increasing for no_growth_limit rounds.
     """
     with Camoufox(headless=True) as browser:
@@ -95,9 +95,9 @@ def fetch_rendered_html_with_camoufox(
         except Exception:
             print("Timed out waiting for selector, continuing anyway...")
 
-        if scroll_until_no_growth and card_selector:
+        if scroll_until_no_growth and item_selector:
             print(
-                f"Scrolling until no growth using CARD_SELECTOR='{card_selector}' "
+                f"Scrolling until no growth using ITEM_SELECTOR='{item_selector}' "
                 f"(no_growth_limit={no_growth_limit}, max_scrolls={MAX_SCROLLS})..."
             )
             last_count = -1
@@ -106,7 +106,7 @@ def fetch_rendered_html_with_camoufox(
 
             while True:
                 try:
-                    current_count = page.locator(card_selector).count()
+                    current_count = page.locator(item_selector).count()
                 except Exception:
                     current_count = -1
 
@@ -129,7 +129,7 @@ def fetch_rendered_html_with_camoufox(
                 scrolls += 1
 
                 if scrolls % 10 == 0:
-                    print(f"Scrolled {scrolls} times; current card count={current_count}")
+                    print(f"Scrolled {scrolls} times; current item count={current_count}")
 
         elif scroll_times > 0:
             print(f"Scrolling {scroll_times} times to load more content...")
@@ -287,10 +287,10 @@ def crawl_infinite_scroll(openai_key: str, today: datetime.date) -> list:
         url=BASE_URL,
         wait_selector=WAIT_SELECTOR,
         timeout_ms=TIMEOUT_MS,
-        scroll_times=MAX_SCROLLS if not CARD_SELECTOR else 0,
+        scroll_times=MAX_SCROLLS if not ITEM_SELECTOR else 0,
         scroll_pause_sec=SCROLL_PAUSE_SEC,
-        scroll_until_no_growth=bool(CARD_SELECTOR),
-        card_selector=CARD_SELECTOR,
+        scroll_until_no_growth=bool(ITEM_SELECTOR),
+        item_selector=ITEM_SELECTOR,
         no_growth_limit=NO_GROWTH_LIMIT,
     )
 
