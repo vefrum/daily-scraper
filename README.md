@@ -34,29 +34,37 @@ Output:
 
 Edit the config section at the top of `camoufox_smartscraper.py`.
 
+### Max scrolls vs max pages
+
+- `MAX_SCROLLS` is a **global** setting used for infinite scroll sources.
+- `max_pages` is a **per-source** setting inside `SOURCES` for paged sources.
+- If a paged source does not specify `max_pages`, the script uses `DEFAULT_MAX_PAGES`.
+
 ### Crawl strategy
 
 #### A) Paged crawl
 Use this when the site supports pagination via query param (e.g. `?page=2`, `?p=2`).
 
-- `CRAWL_STRATEGY = "paged"`
-- `PAGE_PARAM = "page"` (change to `"p"` for Peatix, etc.)
-- `MAX_PAGES = 2` (debug cap)
-- `STOP_MODE = "max_pages"` or `"until_empty"`
+Per source, set:
+- `crawl_strategy = "paged"`
+- `page_param = "page"` (change to `"p"` for Peatix, etc.)
+- `max_pages = 2` (debug cap)
+- `stop_mode = "max_pages"` or `"until_empty"`
 
 #### B) Infinite scroll crawl
 Use this when the site loads more events as you scroll.
 
-- `CRAWL_STRATEGY = "infinite_scroll"`
+Per source, set:
+- `crawl_strategy = "infinite_scroll"`
 
 There are 2 ways to scroll:
 
 1) **Fixed scroll count** (simple, but can be slow)
-- Leave `ITEM_SELECTOR = ""`
-- Set `MAX_SCROLLS` and `SCROLL_PAUSE_SEC`
+- Leave `item_selector = ""`
+- The script will scroll `MAX_SCROLLS` times
 
 2) **Adaptive scroll (recommended)** (stops early when no new items load)
-- Set `ITEM_SELECTOR` to a CSS selector that matches each event item/card
+- Set `item_selector` to a CSS selector that matches each event item/card
 - The script will stop when the number of matched elements stops increasing for `NO_GROWTH_LIMIT` rounds
 - `MAX_SCROLLS` still acts as a safety cap
 
@@ -68,27 +76,26 @@ Examples:
 
 To save the rendered HTML to disk:
 - Set `SAVE_HTML = True`
-- It will write to `HTML_OUTPUT_FILE` (default: `scraped_page.html`)
+- Each source writes to its own `html_output_file` (e.g. `scraped_luma.html`)
 
 This is useful to understand how the site structures its event cards, even if the HTML is large/noisy.
 
-## How to find an ITEM_SELECTOR
+## How to find an item_selector
 
 1. Set:
    - `SAVE_HTML = True`
-   - `CRAWL_STRATEGY = "infinite_scroll"`
-   - (optional) keep `MAX_SCROLLS` small first, like 5–10, just to generate a sample
+   - Enable only the source you’re debugging (set others `enabled: False`)
 
 2. Run:
    - `python camoufox_smartscraper.py`
 
-3. Open `scraped_page.html` in your browser and use DevTools (Inspect Element) on an event card.
+3. Open the saved HTML file (e.g. `scraped_luma.html`) in your browser and use DevTools (Inspect Element) on an event card.
 
 4. Pick a selector that matches all cards.
    - Prefer stable attributes like `data-testid`, `data-*`, or consistent container classes.
    - Avoid highly random-looking class names if possible.
 
-5. Set `ITEM_SELECTOR` and rerun. The crawler should now stop early once no new items load.
+5. Set `item_selector` and rerun. The crawler should now stop early once no new items load.
 
 ## Notes
 - Some sites may show cookie banners or region popups; if extraction looks empty, enable `SAVE_HTML` and inspect what was actually rendered.
