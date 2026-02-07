@@ -1,36 +1,31 @@
-from camoufox import Camoufox
+from camoufox.sync_api import Camoufox
+import time
 
+# 1. Initialize the Stealth Browser
+with Camoufox(headless=True) as browser:
+    page = browser.new_page()
+    
+    # 2. Go to the target URL
+    print("Navigating...")
+    page.goto("https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1") # Example URL
 
-def get_html_from_camoufox(client, url: str) -> str:
-    # Try common method names to retrieve HTML from Camoufox-like clients
-    if hasattr(client, "get_html") and callable(getattr(client, "get_html")):
-        return client.get_html(url)
-    for name in ("get", "fetch_html", "fetch", "html", "get_page_source"):
-        if hasattr(client, name) and callable(getattr(client, name)):
-            return getattr(client, name)(url)
-    if hasattr(client, "navigate") and callable(getattr(client, "navigate")):
-        client.navigate(url)
-        if hasattr(client, "page_source"):
-            src = getattr(client, "page_source")
-            return src() if callable(src) else src
-    raise AttributeError("Camoufox does not provide a known HTML retrieval method (tried: get_html, get, fetch_html, fetch, html, get_page_source, navigate+page_source).")
+    # 3. CRITICAL: Wait for the dynamic content to appear
+    # Don't just sleep; wait for the specific container that holds the tickets/events.
+    # Inspect the site and find a class like '.event-list', '.ticket-types', etc.
+    try:
+        # Wait up to 10 seconds for the element to appear
+        page.wait_for_selector("div.event-list", timeout=10000) 
+        print("Content loaded!")
+    except:
+        print("Timed out waiting for selector, grabbing whatever is there...")
 
+    # 4. Fetch the fully rendered HTML
+    raw_html = page.content()
 
-def main():
-    # Initialize Camoufox
-    camoufox = Camoufox()
+    # 5. (Optional) Save it to a file to verify what you got
+    with open("scraped_page.html", "w", encoding="utf-8") as f:
+        f.write(raw_html)
 
-    # Define the target URL
-    target_url = "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1"
+    print(f"Captured {len(raw_html)} characters of HTML.")
 
-    # Fetch the raw HTML via a compatible method
-    html_content = get_html_from_camoufox(camoufox, target_url)
-
-    # Save the raw HTML to a text file
-    with open("eventbrite_page.txt", "w", encoding="utf-8") as f:
-        f.write(html_content)
-    print("Saved HTML content to eventbrite_page.txt")
-
-
-if __name__ == "__main__":
-    main()
+# Now 'raw_html' is a string you can pass directly to SmartScraperGraph

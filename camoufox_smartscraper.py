@@ -74,7 +74,7 @@ def run_smartscraper_on_html(raw_html: str, openai_key: str, today: datetime.dat
     """
     prompt = f"""
         Find all events on the page.
-        Extract the following fields: 'title', 'date', 'location', 'price','url'.
+        Extract the following fields: 'title', 'date', 'location', 'price from','url'.
 
         IMPORTANT FORMATTING RULES:
         1. Return ONLY a pure JSON list of objects.
