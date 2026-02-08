@@ -25,7 +25,7 @@ NO_GROWTH_LIMIT = 3  # stop after N consecutive scrolls with no increase in item
 DEFAULT_MAX_PAGES = 1
 
 # Debugging / inspection
-SAVE_HTML = True
+SAVE_HTML = False
 
 # =========================
 # VIBE FILTERING CONFIG

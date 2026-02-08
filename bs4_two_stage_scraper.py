@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse
 import nest_asyncio
 import requests
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 
 try:
     import dateparser
@@ -35,6 +36,7 @@ DEFAULT_USER_AGENT = (
 
 REQUESTS_TIMEOUT_SEC = 25
 REQUESTS_RETRIES = 2
+OPENAI_TIMEOUT_SEC = 60
 
 # Be polite; also helps reduce blocks.
 MIN_DELAY_SEC = 0.3
@@ -55,6 +57,8 @@ CACHE_DIR = os.path.join(DATA_DIR, "cache_html")
 DISCOVERY_FILE = os.path.join(DATA_DIR, "events_discovered.json")
 ENRICHED_FILE = os.path.join(DATA_DIR, "events_enriched.json")
 FAILED_FILE = os.path.join(DATA_DIR, "events_failed.json")
+FUN_EVENTS_FILE = os.path.join(DATA_DIR, "events_fun.json")
+REMOVED_EVENTS_FILE = os.path.join(DATA_DIR, "events_removed.json")
 
 # If True, always use Camoufox for detail pages (slow but sometimes necessary).
 FORCE_CAMOUFOX_FOR_DETAILS = False
@@ -62,6 +66,35 @@ FORCE_CAMOUFOX_FOR_DETAILS = False
 # Debugging / inspection
 SAVE_HTML = False
 HTML_DUMP_DIR = os.path.join(DATA_DIR, "html_dumps")
+
+# Vibe filtering (Stage C)
+VIBE_BATCH_SIZE = 30
+VIBE_TAXONOMY = [
+    "nightlife_party",
+    "live_music_gig",
+    "comedy_improv",
+    "food_drink",
+    "sports_fitness",
+    "workshop_fun_crafts",
+    "workshop_upskilling",
+    "arts_culture",
+    "social_mixer",
+    "business_networking",
+    "outdoor_adventure",
+    "festival_market",
+    "family_kids",
+    "religious_spiritual",
+    "corporate_professional",
+    "other",
+]
+REMOVED_CATEGORIES = {
+    "business_networking",
+    "corporate_professional",
+    "workshop_upskilling",
+    "religious_spiritual",
+    "family_kids",
+    "other",
+}
 
 # =========================
 # SOURCES
@@ -84,6 +117,11 @@ SOURCES = {
                 "a.event-card__title",
                 "a[href*='/event/']",
             ],
+            "listing_title_selectors": [
+                "h3.event-name",
+                "h3.promoted-event-name",
+                ".event-card__title",
+            ],
             "detail": "peatix",
         },
     },
@@ -101,6 +139,12 @@ SOURCES = {
             "listing_event_link_selectors": [
                 "a[href*='/e/']",
                 "a[href*='eventbrite.sg/e/']",
+            ],
+            "listing_title_selectors": [
+                "h1",
+                "h2",
+                "h3",
+                "[data-testid='event-card-title']",
             ],
             "detail": "eventbrite",
         },
@@ -121,6 +165,12 @@ SOURCES = {
                 "a[href*='luma.com/']",
                 "a[href^='/']",
             ],
+            "listing_title_selectors": [
+                "h1",
+                "h2",
+                "h3",
+                "[data-testid='event-name']",
+            ],
             "detail": "luma",
         },
     },
@@ -139,6 +189,12 @@ SOURCES = {
             "listing_event_link_selectors": [
                 "a[href*='/en/singapore/']",
                 "a[href^='/']",
+            ],
+            "listing_title_selectors": [
+                "h1",
+                "h2",
+                "h3",
+                "[data-testid='plan-title']",
             ],
             "detail": "fever",
         },
@@ -467,9 +523,29 @@ def fetch_html_requests(url: str, session: requests.Session) -> Optional[str]:
 # DISCOVERY (Stage A)
 # =========================
 
+def extract_listing_title_from_anchor(a_tag, title_selectors: list[str]) -> str:
+    for sel in title_selectors or []:
+        try:
+            node = a_tag.select_one(sel)
+        except Exception:
+            node = None
+        if node:
+            t = strip_text(node.get_text(" ", strip=True))
+            if t:
+                return t
+
+    for attr in ("title", "aria-label"):
+        t = strip_text(a_tag.get(attr, ""))
+        if t:
+            return t
+
+    return strip_text(a_tag.get_text(" ", strip=True))
+
+
 def extract_event_urls_from_listing_html(source_name: str, listing_url: str, html: str) -> list[dict]:
     cfg = SOURCES[source_name]
     selectors = cfg["parsers"]["listing_event_link_selectors"]
+    title_selectors = cfg["parsers"].get("listing_title_selectors", [])
     soup = BeautifulSoup(html, "html.parser")
 
     found = []
@@ -493,7 +569,7 @@ def extract_event_urls_from_listing_html(source_name: str, listing_url: str, htm
                 continue
             seen.add(url)
 
-            title = strip_text(a.get_text(" ", strip=True))
+            title = extract_listing_title_from_anchor(a, title_selectors=title_selectors)
             found.append(
                 {
                     "url": url,
@@ -988,18 +1064,224 @@ def run_stage_b(discovered: list[dict], use_cache: bool, resume: bool) -> tuple[
 
 
 # =========================
+# VIBE FILTERING (Stage C)
+# =========================
+
+def chunk_list(items: list, chunk_size: int) -> list[list]:
+    if chunk_size <= 0:
+        return [items]
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def build_event_id(event: dict) -> str:
+    url = normalise_url(str(event.get("url", "")))
+    if url:
+        return f"url:{url}"
+    basis = f"{strip_text(str(event.get('title', '')))}|{strip_text(str(event.get('description', '')))}"
+    return f"fallback:{sha1(basis)}"
+
+
+def _simple_vibe_heuristic(event: dict) -> str:
+    text = f"{str(event.get('title', ''))} {str(event.get('description', ''))}".strip().lower()
+    if not text:
+        return "other"
+
+    if any(k in text for k in ["networking", "conference", "summit", "seminar", "webinar", "panel", "b2b"]):
+        return "business_networking"
+    if any(k in text for k in ["corporate", "leadership", "executive", "enterprise", "professional"]):
+        return "corporate_professional"
+    if any(k in text for k in ["course", "bootcamp", "cert", "certification", "excel", "python", "sql", "training"]):
+        return "workshop_upskilling"
+    if any(k in text for k in ["church", "temple", "prayer", "worship", "meditation"]):
+        return "religious_spiritual"
+    if any(k in text for k in ["kids", "children", "family-friendly", "family friendly", "toddler"]):
+        return "family_kids"
+    if any(k in text for k in ["party", "rave", "club", "dj", "nightlife"]):
+        return "nightlife_party"
+    if any(k in text for k in ["concert", "live music", "gig", "band", "jazz"]):
+        return "live_music_gig"
+    if any(k in text for k in ["comedy", "stand-up", "stand up", "improv"]):
+        return "comedy_improv"
+    if any(k in text for k in ["brunch", "tasting", "wine", "cocktail", "beer", "dinner", "food festival"]):
+        return "food_drink"
+    if any(k in text for k in ["yoga", "fitness", "run", "running", "workout", "pilates"]):
+        return "sports_fitness"
+    if any(k in text for k in ["pottery", "candle", "art jam", "painting", "craft", "diy", "floral", "mixology"]):
+        return "workshop_fun_crafts"
+    if any(k in text for k in ["hike", "hiking", "trail", "kayak", "cycling", "climb", "adventure"]):
+        return "outdoor_adventure"
+    if any(k in text for k in ["festival", "market", "bazaar", "fair"]):
+        return "festival_market"
+    if any(k in text for k in ["museum", "exhibition", "theatre", "theater", "culture", "poetry"]):
+        return "arts_culture"
+    if any(k in text for k in ["social", "mixer", "meetup", "meet-up", "dating"]):
+        return "social_mixer"
+    return "other"
+
+
+def _extract_first_json_array(text: str) -> list:
+    text = text or ""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+
+    m = re.search(r"\[[\s\S]*\]", text)
+    if not m:
+        return []
+    try:
+        parsed = json.loads(m.group(0))
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def classify_event_vibes_batched(events: list[dict], openai_key: str, vibe_model: str) -> dict[str, str]:
+    payload = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = build_event_id(ev)
+        title = strip_text(str(ev.get("title", "")))
+        description = strip_text(str(ev.get("description", "")))
+        if not event_id or not title:
+            continue
+        payload.append(
+            {
+                "id": event_id,
+                "title": title,
+                "description": description,
+            }
+        )
+
+    if not payload:
+        return {}
+
+    taxonomy_str = ", ".join([f'"{x}"' for x in VIBE_TAXONOMY])
+    prompt = f"""
+Classify each event into exactly one category for a "fun events" feed.
+
+Allowed categories:
+[{taxonomy_str}]
+
+Use only title and description. Choose the best match. Use "other" only if none fits.
+
+Return ONLY JSON array:
+[
+  {{"id":"...", "category":"one_allowed_category"}},
+  ...
+]
+
+Events:
+{json.dumps(payload, ensure_ascii=False)}
+"""
+
+    headers = {
+        "Authorization": f"Bearer {openai_key}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": vibe_model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": "You are a strict event classifier. Output only valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    resp = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=OPENAI_TIMEOUT_SEC,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"OpenAI API error {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    content = ""
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except Exception:
+        content = ""
+
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                parts.append(str(c.get("text", "")))
+        content = "\n".join(parts)
+    elif not isinstance(content, str):
+        content = str(content or "")
+
+    rows = _extract_first_json_array(content)
+    mapping: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        event_id = strip_text(str(row.get("id", "")))
+        category = strip_text(str(row.get("category", "")))
+        if not event_id or category not in VIBE_TAXONOMY:
+            continue
+        mapping[event_id] = category
+    return mapping
+
+
+def apply_vibe_filtering(events: list[dict], openai_key: str, vibe_model: str, batch_size: int) -> tuple[list[dict], list[dict]]:
+    kept: list[dict] = []
+    removed: list[dict] = []
+
+    id_to_category: dict[str, str] = {}
+    batches = chunk_list(events, batch_size)
+    for idx, batch in enumerate(batches, start=1):
+        print(f"[Stage C] Classifying batch {idx}/{len(batches)} (size={len(batch)})")
+        batch_map: dict[str, str] = {}
+        try:
+            batch_map = classify_event_vibes_batched(batch, openai_key=openai_key, vibe_model=vibe_model)
+        except Exception as e:
+            print(f"[Stage C] LLM classification failed for batch {idx}: {e}")
+
+        for ev in batch:
+            if not isinstance(ev, dict):
+                continue
+            event_id = build_event_id(ev)
+            if event_id not in batch_map:
+                batch_map[event_id] = _simple_vibe_heuristic(ev)
+
+        id_to_category.update(batch_map)
+        time.sleep(0.2)
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        event_id = build_event_id(ev)
+        category = id_to_category.get(event_id, _simple_vibe_heuristic(ev))
+        ev["vibe_category"] = category
+        if category in REMOVED_CATEGORIES:
+            removed.append(ev)
+        else:
+            kept.append(ev)
+
+    return kept, removed
+
+
+# =========================
 # CLI
 # =========================
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Two-stage BS4 scraper: discover URLs then enrich details.")
-    p.add_argument("--stage", choices=["a", "b", "ab"], default="ab", help="Which stage(s) to run.")
+    p = argparse.ArgumentParser(description="Multi-stage BS4 scraper: discover URLs, enrich details, then vibe-filter.")
+    p.add_argument("--stage", choices=["a", "b", "c", "ab", "ac", "bc", "abc"], default="ab", help="Which stage(s) to run.")
     p.add_argument("--use-cache", action="store_true", help="Use cached HTML if available.")
     p.add_argument("--no-cache", action="store_true", help="Do not read cache; still writes cache.")
     p.add_argument("--resume", action="store_true", help="Resume Stage B from existing enriched file.")
     p.add_argument("--sources", default="", help="Comma-separated sources to run (default: enabled sources).")
     p.add_argument("--max-pages", type=int, default=None, help="Override max pages for paged sources in Stage A.")
     p.add_argument("--save-html", action="store_true", help="Dump listing/detail HTML into data/html_dumps for selector tuning.")
+    p.add_argument("--vibe-model", default="gpt-5-mini", help="Model for Stage C vibe classification.")
+    p.add_argument("--vibe-batch-size", type=int, default=VIBE_BATCH_SIZE, help="Batch size for Stage C classification.")
     return p.parse_args()
 
 
@@ -1007,7 +1289,9 @@ def main() -> None:
     global SAVE_HTML
 
     ensure_dirs()
+    load_dotenv()
     args = parse_args()
+    selected_stages = set(args.stage)
 
     SAVE_HTML = bool(args.save_html)
 
@@ -1018,13 +1302,13 @@ def main() -> None:
     else:
         enabled_sources = [name for name, cfg in SOURCES.items() if cfg.get("enabled")]
 
-    if not enabled_sources:
+    if ("a" in selected_stages or "b" in selected_stages) and not enabled_sources:
         print("No sources selected/enabled.")
         raise SystemExit(1)
 
     discovered: list[dict] = []
 
-    if args.stage in ("a", "ab"):
+    if "a" in selected_stages:
         discovered = run_stage_a(
             enabled_sources=enabled_sources,
             use_cache=use_cache,
@@ -1033,7 +1317,9 @@ def main() -> None:
         save_json(DISCOVERY_FILE, discovered)
         print(f"[Stage A] Saved discovery file: {DISCOVERY_FILE}")
 
-    if args.stage in ("b", "ab"):
+    enriched: list[dict] = []
+
+    if "b" in selected_stages:
         if not discovered:
             discovered = load_json(DISCOVERY_FILE, default=[])
             if not discovered:
@@ -1048,6 +1334,31 @@ def main() -> None:
 
         print(f"[Stage B] Saved enriched events: {ENRICHED_FILE} (count={len(enriched)})")
         print(f"[Stage B] Saved failed events: {FAILED_FILE} (count={len(failed)})")
+
+    if "c" in selected_stages:
+        if not enriched:
+            enriched = load_json(ENRICHED_FILE, default=[])
+            if not enriched:
+                print("No enriched data found. Run Stage B first or provide enriched file.")
+                raise SystemExit(1)
+
+        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not openai_key:
+            print("OPENAI_API_KEY not found. Add it in environment or .env for Stage C.")
+            raise SystemExit(1)
+
+        batch_size = max(1, int(args.vibe_batch_size))
+        kept, removed = apply_vibe_filtering(
+            enriched,
+            openai_key=openai_key,
+            vibe_model=args.vibe_model,
+            batch_size=batch_size,
+        )
+
+        save_json(FUN_EVENTS_FILE, kept)
+        save_json(REMOVED_EVENTS_FILE, removed)
+        print(f"[Stage C] Saved fun events: {FUN_EVENTS_FILE} (count={len(kept)})")
+        print(f"[Stage C] Saved removed events: {REMOVED_EVENTS_FILE} (count={len(removed)})")
 
 
 if __name__ == "__main__":
