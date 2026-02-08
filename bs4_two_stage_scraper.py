@@ -590,38 +590,37 @@ def _parse_peatix_schema_org_event(soup: BeautifulSoup) -> dict:
         return out
 
     def meta_content(scope, prop: str) -> str:
+        if not scope:
+            return ""
         node = scope.select_one(f'meta[itemprop="{prop}"]')
         if node and node.get("content"):
             return strip_text(node.get("content"))
         return ""
 
+    # Rule 1: title from meta itemprop="name"
     title = meta_content(event_scope, "name")
+
+    # Rule 4: start_datetime_sg from meta itemprop="startDate"
     start = meta_content(event_scope, "startDate")
-    end = meta_content(event_scope, "endDate")
 
-    # Location
+    # Rule 8: end_datetime_sg should be empty string (even if present)
+    end = ""
+
+    # Rule 2: location from meta itemprop="address" inside location block
     loc_scope = event_scope.select_one('[itemprop="location"][itemscope]')
-    loc_name = meta_content(loc_scope, "name") if loc_scope else ""
-    loc_addr = meta_content(loc_scope, "address") if loc_scope else ""
-    location = strip_text(" - ".join([p for p in [loc_name, loc_addr] if strip_text(p)]))
+    location = meta_content(loc_scope, "address")
 
-    # Offers / price
+    # Rule 3: price from meta itemprop="price"
     offer_scope = event_scope.select_one('[itemprop="offers"][itemscope]')
-    price = meta_content(offer_scope, "price") if offer_scope else ""
-    currency = meta_content(offer_scope, "priceCurrency") if offer_scope else ""
-    price_text = ""
-    if price and currency:
-        price_text = f"{currency} {price}"
-    else:
-        price_text = first_non_empty(price, currency)
+    price = meta_content(offer_scope, "price")
 
-    # Use schema dates as authoritative and non-ambiguous.
-    # Keep date_text as a readable combined string too.
+    # Rule 5: description from meta name="description"
+    meta_desc = soup.select_one('meta[name="description"]')
+    description = strip_text(meta_desc.get("content")) if meta_desc and meta_desc.get("content") else ""
+
+    # Rule 6/7: capacity/date_text empty
+    capacity = ""
     date_text = ""
-    if start and end:
-        date_text = f"{start} - {end}"
-    else:
-        date_text = first_non_empty(start, end)
 
     out.update(
         {
@@ -630,17 +629,19 @@ def _parse_peatix_schema_org_event(soup: BeautifulSoup) -> dict:
             "end_datetime_sg": end,
             "date_text": date_text,
             "location": location,
-            "price": price_text,
+            "price": price,
+            "capacity": capacity,
+            "description": description,
         }
     )
     return out
 
 
 def parse_detail_peatix(soup: BeautifulSoup) -> dict:
-    # 1) Schema.org microdata (most stable)
+    # For Peatix, we prioritise schema.org microdata because the app content may not be rendered yet.
     schema = _parse_peatix_schema_org_event(soup)
 
-    # 2) Fallback selectors for fields that schema may not include (esp description/capacity)
+    # If schema is missing, fallback to best-effort visible extraction (may be empty if app not rendered).
     title_fallback = first_non_empty(
         soup.select_one("h1") and soup.select_one("h1").get_text(" ", strip=True),
         soup.title.string if soup.title else "",
@@ -652,10 +653,7 @@ def parse_detail_peatix(soup: BeautifulSoup) -> dict:
         soup.select_one(".event__description") or
         soup.select_one("article")
     )
-    description = strip_text(desc_node.get_text("\n", strip=True)) if desc_node else ""
-
-    date_node = soup.select_one("time") or soup.select_one(".event__date") or soup.select_one(".event-date")
-    date_text_fallback = strip_text(date_node.get_text(" ", strip=True)) if date_node else ""
+    description_fallback = strip_text(desc_node.get_text("\n", strip=True)) if desc_node else ""
 
     loc_node = soup.select_one(".event__venue") or soup.select_one(".event-venue") or soup.select_one("[data-testid='venue']")
     location_fallback = strip_text(loc_node.get_text(" ", strip=True)) if loc_node else ""
@@ -663,19 +661,18 @@ def parse_detail_peatix(soup: BeautifulSoup) -> dict:
     price_node = soup.select_one(".event__ticket") or soup.select_one(".ticket") or soup.select_one("[data-testid='ticket-price']")
     price_fallback = strip_text(price_node.get_text(" ", strip=True)) if price_node else ""
 
-    cap_node = soup.select_one(".event__status") or soup.select_one(".status") or soup.select_one("[data-testid='availability']")
-    capacity = strip_text(cap_node.get_text(" ", strip=True)) if cap_node else ""
+    meta_desc = soup.select_one('meta[name="description"]')
+    meta_description = strip_text(meta_desc.get("content")) if meta_desc and meta_desc.get("content") else ""
 
-    # Merge: schema first, then fallback if missing
     return {
         "title": first_non_empty(schema.get("title", ""), title_fallback),
         "location": first_non_empty(schema.get("location", ""), location_fallback),
         "price": first_non_empty(schema.get("price", ""), price_fallback),
-        "capacity": capacity,
-        "description": description,
-        "date_text": first_non_empty(schema.get("date_text", ""), date_text_fallback),
+        "capacity": "",  # Rule 6
+        "description": first_non_empty(schema.get("description", ""), meta_description, description_fallback),
+        "date_text": "",  # Rule 7
         "start_datetime_sg": strip_text(schema.get("start_datetime_sg", "")),
-        "end_datetime_sg": strip_text(schema.get("end_datetime_sg", "")),
+        "end_datetime_sg": "",  # Rule 8
     }
 
 
