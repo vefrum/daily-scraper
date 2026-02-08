@@ -46,6 +46,9 @@ SCROLL_PAUSE_SEC = 1.2
 MAX_SCROLLS = 2
 NO_GROWTH_LIMIT = 3
 
+# Global default for paged sources (Stage A)
+DEFAULT_MAX_PAGES = 3
+
 # Output / cache
 DATA_DIR = "data"
 CACHE_DIR = os.path.join(DATA_DIR, "cache_html")
@@ -55,6 +58,10 @@ FAILED_FILE = os.path.join(DATA_DIR, "events_failed.json")
 
 # If True, always use Camoufox for detail pages (slow but sometimes necessary).
 FORCE_CAMOUFOX_FOR_DETAILS = False
+
+# Debugging / inspection
+SAVE_HTML = False
+HTML_DUMP_DIR = os.path.join(DATA_DIR, "html_dumps")
 
 # =========================
 # SOURCES
@@ -70,10 +77,9 @@ SOURCES = {
             "base_url": "https://peatix.com/search?utm_source=homebanner&p=1",
             "page_param": "p",
             "start_page": 1,
-            "max_pages": 3,
+            # "max_pages": 3,  # optional; falls back to DEFAULT_MAX_PAGES
             "wait_selector": ".event-card",
             "item_selector": "",
-            "html_output_file": os.path.join(DATA_DIR, "rendered_listing_peatix.html"),
         },
         "parsers": {
             "listing_event_link_selectors": [
@@ -90,10 +96,9 @@ SOURCES = {
             "base_url": "https://www.eventbrite.sg/d/singapore--singapore/all-events/?page=1",
             "page_param": "page",
             "start_page": 1,
-            "max_pages": 3,
+            # "max_pages": 3,  # optional; falls back to DEFAULT_MAX_PAGES
             "wait_selector": "body",
             "item_selector": "",
-            "html_output_file": os.path.join(DATA_DIR, "rendered_listing_eventbrite.html"),
         },
         "parsers": {
             "listing_event_link_selectors": [
@@ -113,7 +118,6 @@ SOURCES = {
             "max_pages": 1,
             "wait_selector": "body",
             "item_selector": ".card-wrapper",
-            "html_output_file": os.path.join(DATA_DIR, "rendered_listing_luma.html"),
         },
         "parsers": {
             "listing_event_link_selectors": [
@@ -133,7 +137,6 @@ SOURCES = {
             "max_pages": 1,
             "wait_selector": "body",
             "item_selector": '[data-testid^="fv-plan-card"]',
-            "html_output_file": os.path.join(DATA_DIR, "rendered_listing_fever.html"),
         },
         "parsers": {
             "listing_event_link_selectors": [
@@ -153,6 +156,7 @@ SOURCES = {
 def ensure_dirs() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(HTML_DUMP_DIR, exist_ok=True)
 
 
 def polite_delay() -> None:
@@ -223,6 +227,13 @@ def write_cached_html(url: str, kind: str, html: str) -> None:
         f.write(html)
 
 
+def dump_html(filename: str, html: str) -> None:
+    path = os.path.join(HTML_DUMP_DIR, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"[Debug] Saved HTML dump: {path} ({len(html)} chars)")
+
+
 def strip_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
@@ -283,7 +294,6 @@ def parse_datetime_range_sg(date_text: str, base_dt_sg: datetime.datetime) -> di
 
         # If right side is only a time, dateparser might parse it as today; align date with start.
         if start_dt and end_dt and end_dt.date() != start_dt.date():
-            # If end_dt has no explicit date, try parsing right with start date context.
             end_dt2 = dateparser.parse(
                 f"{start_dt.strftime('%Y-%m-%d')} {right}",
                 settings=settings
@@ -292,15 +302,21 @@ def parse_datetime_range_sg(date_text: str, base_dt_sg: datetime.datetime) -> di
                 end_dt = end_dt2
 
         if start_dt:
-            out["start_datetime_sg"] = start_dt.astimezone(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+            out["start_datetime_sg"] = start_dt.astimezone(
+                datetime.timezone(datetime.timedelta(hours=8))
+            ).strftime("%Y-%m-%d %H:%M")
         if end_dt:
-            out["end_datetime_sg"] = end_dt.astimezone(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+            out["end_datetime_sg"] = end_dt.astimezone(
+                datetime.timezone(datetime.timedelta(hours=8))
+            ).strftime("%Y-%m-%d %H:%M")
         return out
 
     # Single datetime
     dt = dateparser.parse(date_text, settings=settings)
     if dt:
-        out["start_datetime_sg"] = dt.astimezone(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M")
+        out["start_datetime_sg"] = dt.astimezone(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ).strftime("%Y-%m-%d %H:%M")
     return out
 
 
@@ -370,7 +386,7 @@ def fetch_rendered_html_with_camoufox(
 def fetch_html_requests(url: str, session: requests.Session) -> Optional[str]:
     headers = {"User-Agent": DEFAULT_USER_AGENT}
     last_err = None
-    for attempt in range(REQUESTS_RETRIES + 1):
+    for _attempt in range(REQUESTS_RETRIES + 1):
         try:
             polite_delay()
             resp = session.get(url, headers=headers, timeout=REQUESTS_TIMEOUT_SEC, allow_redirects=True)
@@ -428,7 +444,7 @@ def extract_event_urls_from_listing_html(source_name: str, listing_url: str, htm
     return found
 
 
-def discover_urls_for_source(source_name: str, use_cache: bool) -> list[dict]:
+def discover_urls_for_source(source_name: str, use_cache: bool, max_pages_override: Optional[int]) -> list[dict]:
     cfg = SOURCES[source_name]
     listing = cfg["listing"]
     strategy = listing["strategy"]
@@ -438,8 +454,11 @@ def discover_urls_for_source(source_name: str, use_cache: bool) -> list[dict]:
     if strategy == "paged":
         base_url = listing["base_url"]
         page_param = listing["page_param"]
-        start_page = int(listing["start_page"])
-        max_pages = int(listing["max_pages"])
+        start_page = int(listing.get("start_page", 1))
+        max_pages = int(listing.get("max_pages", DEFAULT_MAX_PAGES))
+        if max_pages_override is not None:
+            max_pages = int(max_pages_override)
+
         wait_selector = listing.get("wait_selector", "body") or "body"
 
         for page_num in range(start_page, start_page + max_pages):
@@ -457,6 +476,9 @@ def discover_urls_for_source(source_name: str, use_cache: bool) -> list[dict]:
                     scroll_times=0,
                 )
                 write_cached_html(url, "listing", html)
+
+            if SAVE_HTML:
+                dump_html(f"listing_{source_name}_page_{page_num}.html", html)
 
             rows = extract_event_urls_from_listing_html(source_name, url, html)
             print(f"[Stage A] {source_name} page {page_num}: found {len(rows)} event URLs")
@@ -482,6 +504,9 @@ def discover_urls_for_source(source_name: str, use_cache: bool) -> list[dict]:
                 no_growth_limit=NO_GROWTH_LIMIT,
             )
             write_cached_html(url, "listing", html)
+
+        if SAVE_HTML:
+            dump_html(f"listing_{source_name}.html", html)
 
         rows = extract_event_urls_from_listing_html(source_name, url, html)
         print(f"[Stage A] {source_name}: found {len(rows)} event URLs")
@@ -716,11 +741,8 @@ def parse_event_detail(source_name: str, url: str, html: str, base_dt_sg: dateti
     data["start_datetime_sg"] = dt_info["start_datetime_sg"]
     data["end_datetime_sg"] = dt_info["end_datetime_sg"]
 
-    # Ensure required fields exist
     data["url"] = url
     data["source"] = source_name
-
-    # If title missing, fallback to discovered title later (handled by caller)
     return data
 
 
@@ -743,13 +765,11 @@ def fetch_detail_html(url: str, source_name: str, session: requests.Session, use
     if not FORCE_CAMOUFOX_FOR_DETAILS:
         html = fetch_html_requests(url, session=session)
         if html:
-            # If it looks like a bot block / empty shell, we can still fallback.
             text = strip_text(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
             if len(text) > 200:
                 write_cached_html(url, "detail", html)
                 return FetchResult(html=html, method="requests")
 
-    # Fallback to Camoufox
     try:
         html = fetch_rendered_html_with_camoufox(
             url=url,
@@ -778,11 +798,11 @@ def dedupe_by_url(rows: list[dict]) -> list[dict]:
     return out
 
 
-def run_stage_a(enabled_sources: list[str], use_cache: bool) -> list[dict]:
+def run_stage_a(enabled_sources: list[str], use_cache: bool, max_pages_override: Optional[int]) -> list[dict]:
     all_rows: list[dict] = []
     for source_name in enabled_sources:
         print(f"\n[Stage A] Discovering URLs for: {source_name}")
-        rows = discover_urls_for_source(source_name, use_cache=use_cache)
+        rows = discover_urls_for_source(source_name, use_cache=use_cache, max_pages_override=max_pages_override)
         all_rows.extend(rows)
 
     all_rows = dedupe_by_url(all_rows)
@@ -792,7 +812,6 @@ def run_stage_a(enabled_sources: list[str], use_cache: bool) -> list[dict]:
 
 def run_stage_b(discovered: list[dict], use_cache: bool, resume: bool) -> tuple[list[dict], list[dict]]:
     session = requests.Session()
-
     base_dt_sg = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
 
     enriched: list[dict] = []
@@ -827,24 +846,21 @@ def run_stage_b(discovered: list[dict], use_cache: bool, resume: bool) -> tuple[
             failed.append({"url": url, "reason": "fetch_failed", "source": source_name})
             continue
 
+        if SAVE_HTML:
+            dump_html(f"detail_{source_name}_{sha1(url)}.html", fr.html)
+
         try:
             ev = parse_event_detail(source_name, url, fr.html, base_dt_sg=base_dt_sg)
         except Exception as e:
             failed.append({"url": url, "reason": f"parse_failed: {e}", "source": source_name})
             continue
 
-        # Fill missing title from discovery if needed
         if not strip_text(ev.get("title", "")):
             ev["title"] = strip_text(d.get("title", ""))
 
         ev["fetch_method"] = fr.method
-
-        # If date is still ambiguous/unparsed, you said you want it resolved.
-        # We keep date_text always; if parsing failed, start_datetime_sg will be empty.
-        # You can decide later whether to drop these or reprocess with better per-site parsing.
         enriched.append(ev)
 
-        # Checkpoint every 50
         if len(enriched) % 50 == 0:
             save_json(ENRICHED_FILE, enriched)
             save_json(FAILED_FILE, failed)
@@ -864,12 +880,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-cache", action="store_true", help="Do not read cache; still writes cache.")
     p.add_argument("--resume", action="store_true", help="Resume Stage B from existing enriched file.")
     p.add_argument("--sources", default="", help="Comma-separated sources to run (default: enabled sources).")
+    p.add_argument("--max-pages", type=int, default=None, help="Override max pages for paged sources in Stage A.")
+    p.add_argument("--save-html", action="store_true", help="Dump listing/detail HTML into data/html_dumps for selector tuning.")
     return p.parse_args()
 
 
 def main() -> None:
+    global SAVE_HTML
+
     ensure_dirs()
     args = parse_args()
+
+    SAVE_HTML = bool(args.save_html)
 
     use_cache = bool(args.use_cache) and not bool(args.no_cache)
 
@@ -885,7 +907,11 @@ def main() -> None:
     discovered: list[dict] = []
 
     if args.stage in ("a", "ab"):
-        discovered = run_stage_a(enabled_sources=enabled_sources, use_cache=use_cache)
+        discovered = run_stage_a(
+            enabled_sources=enabled_sources,
+            use_cache=use_cache,
+            max_pages_override=args.max_pages,
+        )
         save_json(DISCOVERY_FILE, discovered)
         print(f"[Stage A] Saved discovery file: {DISCOVERY_FILE}")
 
