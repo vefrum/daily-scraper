@@ -47,7 +47,7 @@ MAX_SCROLLS = 2
 NO_GROWTH_LIMIT = 3
 
 # Global default for paged sources (Stage A)
-DEFAULT_MAX_PAGES = 3
+DEFAULT_MAX_PAGES = 2
 
 # Output / cache
 DATA_DIR = "data"
@@ -131,7 +131,7 @@ SOURCES = {
         "enabled": False,
         "listing": {
             "strategy": "infinite_scroll",
-            "base_url": "https://feverup.com/en/singapore/things-to-do",
+            "base_url": "https://feverup.com/en/singapore/things-to-do?_gl=1*175v6iz*_up*MQ..*_ga*Njk4MTYyMjc4LjE3NzA0NjM4NDk.*_ga_L4M4ND4NG4*czE3NzA0NjM4NDUkbzEkZzAkdDE3NzA0NjM4NDUkajYwJGwwJGg3MzQzOTc4NDc.*_ga_D4T4V3RS3*czE3NzA0NjM4NDgkbzEkZzAkdDE3NzA0NjM4NDgkajYwJGwwJGgw",
             "page_param": "page",
             "start_page": 1,
             "max_pages": 1,
