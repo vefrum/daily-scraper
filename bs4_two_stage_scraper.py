@@ -555,14 +555,97 @@ def parse_detail_generic(soup: BeautifulSoup) -> dict:
     }
 
 
+def _parse_peatix_schema_org_event(soup: BeautifulSoup) -> dict:
+    """
+    Extracts event info from schema.org microdata if present.
+
+    Expected structure (example):
+      <div itemscope itemtype="http://schema.org/Event">
+        <meta itemprop="name" content="...">
+        <meta itemprop="startDate" content="2026-03-15T10:00">
+        <meta itemprop="endDate" content="2026-03-15T12:00"> (optional)
+        <div itemprop="location" itemscope itemtype="http://schema.org/Place">
+          <meta itemprop="name" content="The Cathay">
+          <meta itemprop="address" content="2 Handy Rd, Singapore">
+        </div>
+        <div itemprop="offers" itemscope itemtype="http://schema.org/Offer">
+          <meta itemprop="price" content="25"/>
+          <meta itemprop="priceCurrency" content="SGD"/>
+        </div>
+      </div>
+    """
+    out = {
+        "title": "",
+        "start_datetime_sg": "",
+        "end_datetime_sg": "",
+        "date_text": "",
+        "location": "",
+        "price": "",
+        "capacity": "",
+        "description": "",
+    }
+
+    event_scope = soup.select_one('[itemscope][itemtype="http://schema.org/Event"]')
+    if not event_scope:
+        return out
+
+    def meta_content(scope, prop: str) -> str:
+        node = scope.select_one(f'meta[itemprop="{prop}"]')
+        if node and node.get("content"):
+            return strip_text(node.get("content"))
+        return ""
+
+    title = meta_content(event_scope, "name")
+    start = meta_content(event_scope, "startDate")
+    end = meta_content(event_scope, "endDate")
+
+    # Location
+    loc_scope = event_scope.select_one('[itemprop="location"][itemscope]')
+    loc_name = meta_content(loc_scope, "name") if loc_scope else ""
+    loc_addr = meta_content(loc_scope, "address") if loc_scope else ""
+    location = strip_text(" - ".join([p for p in [loc_name, loc_addr] if strip_text(p)]))
+
+    # Offers / price
+    offer_scope = event_scope.select_one('[itemprop="offers"][itemscope]')
+    price = meta_content(offer_scope, "price") if offer_scope else ""
+    currency = meta_content(offer_scope, "priceCurrency") if offer_scope else ""
+    price_text = ""
+    if price and currency:
+        price_text = f"{currency} {price}"
+    else:
+        price_text = first_non_empty(price, currency)
+
+    # Use schema dates as authoritative and non-ambiguous.
+    # Keep date_text as a readable combined string too.
+    date_text = ""
+    if start and end:
+        date_text = f"{start} - {end}"
+    else:
+        date_text = first_non_empty(start, end)
+
+    out.update(
+        {
+            "title": title,
+            "start_datetime_sg": start,
+            "end_datetime_sg": end,
+            "date_text": date_text,
+            "location": location,
+            "price": price_text,
+        }
+    )
+    return out
+
+
 def parse_detail_peatix(soup: BeautifulSoup) -> dict:
-    # Best-effort selectors; may need tweaking.
-    title = first_non_empty(
+    # 1) Schema.org microdata (most stable)
+    schema = _parse_peatix_schema_org_event(soup)
+
+    # 2) Fallback selectors for fields that schema may not include (esp description/capacity)
+    title_fallback = first_non_empty(
         soup.select_one("h1") and soup.select_one("h1").get_text(" ", strip=True),
         soup.title.string if soup.title else "",
     )
 
-    # Description often in a content area; try a few.
     desc_node = (
         soup.select_one(".event-description") or
         soup.select_one("[data-testid='event-description']") or
@@ -571,31 +654,28 @@ def parse_detail_peatix(soup: BeautifulSoup) -> dict:
     )
     description = strip_text(desc_node.get_text("\n", strip=True)) if desc_node else ""
 
-    # Date/time text
     date_node = soup.select_one("time") or soup.select_one(".event__date") or soup.select_one(".event-date")
-    date_text = strip_text(date_node.get_text(" ", strip=True)) if date_node else ""
+    date_text_fallback = strip_text(date_node.get_text(" ", strip=True)) if date_node else ""
 
-    # Location
     loc_node = soup.select_one(".event__venue") or soup.select_one(".event-venue") or soup.select_one("[data-testid='venue']")
-    location = strip_text(loc_node.get_text(" ", strip=True)) if loc_node else ""
+    location_fallback = strip_text(loc_node.get_text(" ", strip=True)) if loc_node else ""
 
-    # Price
     price_node = soup.select_one(".event__ticket") or soup.select_one(".ticket") or soup.select_one("[data-testid='ticket-price']")
-    price = strip_text(price_node.get_text(" ", strip=True)) if price_node else ""
+    price_fallback = strip_text(price_node.get_text(" ", strip=True)) if price_node else ""
 
-    # Capacity / availability
     cap_node = soup.select_one(".event__status") or soup.select_one(".status") or soup.select_one("[data-testid='availability']")
     capacity = strip_text(cap_node.get_text(" ", strip=True)) if cap_node else ""
 
+    # Merge: schema first, then fallback if missing
     return {
-        "title": title,
-        "location": location,
-        "price": price,
+        "title": first_non_empty(schema.get("title", ""), title_fallback),
+        "location": first_non_empty(schema.get("location", ""), location_fallback),
+        "price": first_non_empty(schema.get("price", ""), price_fallback),
         "capacity": capacity,
         "description": description,
-        "date_text": date_text,
-        "start_datetime_sg": "",
-        "end_datetime_sg": "",
+        "date_text": first_non_empty(schema.get("date_text", ""), date_text_fallback),
+        "start_datetime_sg": strip_text(schema.get("start_datetime_sg", "")),
+        "end_datetime_sg": strip_text(schema.get("end_datetime_sg", "")),
     }
 
 
@@ -735,11 +815,13 @@ def parse_event_detail(source_name: str, url: str, html: str, base_dt_sg: dateti
     else:
         data = parse_detail_generic(soup)
 
-    # Normalise date text into resolved datetimes (SG)
-    dt_info = parse_datetime_range_sg(data.get("date_text", ""), base_dt_sg=base_dt_sg)
-    data["date_text"] = dt_info["date_text"]
-    data["start_datetime_sg"] = dt_info["start_datetime_sg"]
-    data["end_datetime_sg"] = dt_info["end_datetime_sg"]
+    # If schema already provided unambiguous ISO-like datetimes, keep them.
+    # Otherwise, normalise date text into resolved datetimes (SG).
+    if not strip_text(data.get("start_datetime_sg", "")) and strip_text(data.get("date_text", "")):
+        dt_info = parse_datetime_range_sg(data.get("date_text", ""), base_dt_sg=base_dt_sg)
+        data["date_text"] = dt_info["date_text"]
+        data["start_datetime_sg"] = dt_info["start_datetime_sg"]
+        data["end_datetime_sg"] = dt_info["end_datetime_sg"]
 
     data["url"] = url
     data["source"] = source_name
